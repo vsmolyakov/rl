@@ -2,111 +2,103 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 import gymnasium as gym
+from collections import defaultdict
 
 class TileCoder:
-
-    def __init__(
-        self,
-        low,
-        high,
-        bins=(8, 8),
-        num_tilings=8
-    ):
-
+    def __init__(self, low, high, num_tilings=8, bins=(8, 8)):
         self.low = low
         self.high = high
-
-        self.bins = np.array(bins)
         self.num_tilings = num_tilings
+        self.bins = np.array(bins)
 
         self.tile_width = (high - low) / (self.bins - 1)
 
+        # offset each tiling slightly
         self.offsets = [
-            self.tile_width
-            * i
-            / num_tilings
+            (i / num_tilings) * self.tile_width
             for i in range(num_tilings)
         ]
 
-        self.tiles_per_tiling = (bins[0] * bins[1])
-        self.num_features = (self.tiles_per_tiling * num_tilings)
-
-    def encode(self, state):
-
+    def get_tiles(self, state):
         features = []
 
-        for t in range(self.num_tilings):
+        for tiling, offset in enumerate(self.offsets):
 
-            shifted = (state + self.offsets[t])
-            coords = ((shifted - self.low) / self.tile_width).astype(int)
+            scaled = (
+                (state - self.low + offset)
+                / self.tile_width
+            ).astype(int)
 
-            coords = np.clip(
-                coords,
+            scaled = np.clip(
+                scaled,
                 0,
                 self.bins - 1
             )
 
-            idx = (
-                t
-                * self.tiles_per_tiling
-                + coords[0]
-                * self.bins[1]
-                + coords[1]
+            features.append(
+                (
+                    tiling,
+                    scaled[0],
+                    scaled[1]
+                )
             )
 
-            features.append(idx)
+        return features
 
-        return np.array(features)
-
-
-class SARSALambda:
+class SarsaLambdaAgent:
 
     def __init__(
         self,
-        num_actions,
-        num_features,
+        n_actions,
+        tile_coder,
         alpha=0.3,
-        gamma=0.99,
+        gamma=1.0,
         lam=0.9,
-        epsilon=0.1
+        epsilon=0.05
     ):
+        self.n_actions = n_actions
+        self.tc = tile_coder
 
-        self.num_actions = num_actions
-        self.num_features = num_features
-
-        self.alpha = (alpha/8)
-
+        self.alpha = alpha / tile_coder.num_tilings
         self.gamma = gamma
         self.lam = lam
         self.epsilon = epsilon
 
-        self.w = np.zeros((num_actions, num_features))
+        self.w = defaultdict(float)
 
-    def q(self, features):
-        return (self.w[:,features].sum(axis=1))
+    def q_value(self, state, action):
 
-    def select_action(
-        self,
-        features
-    ):
+        return sum(
+            self.w[(f, action)]
+            for f in self.tc.get_tiles(state)
+        )
 
-        if (np.random.rand() < self.epsilon):
-            return np.random.randint(self.num_actions)
+    def choose_action(self, state):
 
-        return np.argmax(self.q(features))
+        if np.random.rand() < self.epsilon:
+            return np.random.randint(
+                self.n_actions
+            )
+
+        qs = [
+            self.q_value(state, a)
+            for a in range(self.n_actions)
+        ]
+
+        return np.argmax(qs)
 
     def update(
         self,
-        features,
+        state,
         action,
         reward,
-        next_features,
+        next_state,
         next_action,
         done,
-        eligibility
+        traces
     ):
 
-        current_q = (self.q(features)[action])
+        q = self.q_value(state, action)
 
         if done:
             target = reward
@@ -114,126 +106,128 @@ class SARSALambda:
             target = (
                 reward
                 + self.gamma
-                * self.q(
-                    next_features
-                )[next_action]
+                * self.q_value(
+                    next_state,
+                    next_action
+                )
             )
 
-        delta = (target - current_q)
+        delta = target - q
 
-        eligibility *= (self.gamma * self.lam)
+        # decay traces
+        for k in list(traces.keys()):
+            traces[k] *= (
+                self.gamma
+                * self.lam
+            )
 
-        eligibility[action, features] += 1
+        # replacing traces
+        for f in self.tc.get_tiles(state):
+            traces[(f, action)] = 1.0
 
-        self.w += (self.alpha * delta * eligibility)
+        # update weights
+        for k in traces:
+            self.w[k] += (
+                self.alpha
+                * delta
+                * traces[k]
+            )
+
+        return traces
 
 
-env = gym.make(
-    "MountainCar-v0",
-)
+env = gym.make("MountainCar-v0")
 
-coder = TileCoder(
+tc = TileCoder(
     env.observation_space.low,
-    env.observation_space.high
+    env.observation_space.high,
+    num_tilings=8,
+    bins=(8, 8)
 )
 
-agent = SARSALambda(
-    num_actions=env.action_space.n,
-    num_features=coder.num_features,
-    alpha=0.4,
-    gamma=0.99,
+agent = SarsaLambdaAgent(
+    n_actions=env.action_space.n,
+    tile_coder=tc,
+    alpha=0.5,
+    gamma=1.0,
     lam=0.9,
-    epsilon=0.1
+    epsilon=0.05
 )
 
 episodes = 500
 returns = []
 
-for episode in range(episodes):
+for ep in range(episodes):
 
     state, _ = env.reset()
 
-    eligibility = np.zeros(
-        (
-            env.action_space.n,
-            coder.num_features
-        )
+    traces = defaultdict(float)
+
+    action = agent.choose_action(
+        state
     )
 
-    features = (coder.encode(state))
-
-    action = (agent.select_action(features))
-
     total_reward = 0
+
     done = False
 
     while not done:
 
-        (next_state, reward, terminated, truncated, _) = env.step(action)
-
-        done = (terminated or truncated)
-
-        if not done:
-
-            next_features = (
-                coder.encode(
-                    next_state
-                )
-            )
-
-            next_action = (
-                agent
-                .select_action(
-                    next_features
-                )
-            )
-
-        else:
-
-            next_features = None
-            next_action = None
-
-        agent.update(
-            features,
-            action,
-            reward,
-            next_features,
-            next_action,
-            done,
-            eligibility
+        next_state, reward, terminated, truncated, _ = (
+            env.step(action)
         )
 
-        state = next_state
-        features = next_features
-        action = next_action
+        done = (
+            terminated
+            or truncated
+        )
 
         total_reward += reward
 
-    returns.append(total_reward)
+        if not done:
+            next_action = (
+                agent.choose_action(
+                    next_state
+                )
+            )
+        else:
+            next_action = None
 
-    if episode % 50 == 0:
-        print(
-            f"Episode "
-            f"{episode}, "
-            f"return="
-            f"{total_reward}"
+        traces = agent.update(
+            state,
+            action,
+            reward,
+            next_state,
+            next_action,
+            done,
+            traces
         )
 
+        state = next_state
+        action = next_action
+
+    returns.append(
+        total_reward
+    )
+
+    if (ep + 1) % 50 == 0:
+        print(
+            f"Episode {ep+1}, "
+            f"avg return="
+            f"{np.mean(returns[-50:]):.1f}"
+        )
 
 env.close()
 
-
-window = 20
-
+window = 50
 avg = np.convolve(
     returns,
     np.ones(window)
     / window,
     mode="valid"
 )
-
-plt.plot(avg)
+plt.plot(avg, color='red', linewidth=2)
 plt.xlabel("Episode")
-plt.ylabel("Average Return")
-plt.title("SARSA(lambda) - MountainCar")
+plt.ylabel("Avg Return")
+plt.title("SARSA(lambda) on MountainCar")
 plt.show()
