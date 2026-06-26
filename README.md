@@ -9,6 +9,7 @@ reinforcement learning algorithms
 - [monte-carlo-control](./monte_carlo_control.py): monte carlo control (eps-greedy) on frozen lake
 - [off-policy-importance-sampling](./off_policy_importance_sampling_monte_carlo.py): off-policy weighted importance sampling monte carlo in blackjack 
 - [monte-carlo-tree-search](./monte_carlo_tree_search.py): monte-carlo tree search for tic-tac-toe  
+- [sarsa-lambda](./sarsa_lambda.py): sarsa(lambda) eligibility traces for the mountain car  
 
 ### Deep RL
 
